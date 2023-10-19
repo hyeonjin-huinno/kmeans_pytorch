@@ -29,7 +29,7 @@ def kmeans(
         num_clusters,
         distance='euclidean',
         cluster_centers=[],
-        tol=1e-4,
+        tol=0.01,
         tqdm_flag=True,
         iter_limit=0,
         device=torch.device('cpu'),
@@ -85,6 +85,8 @@ def kmeans(
     if tqdm_flag:
         tqdm_meter = tqdm(desc='[running kmeans]')
     while True:
+
+        torch.cuda.empty_cache()  # GPU 캐시 비우기
 
         dis = pairwise_distance_function(X, initial_state)
 
@@ -209,28 +211,72 @@ def pairwise_cosine(data1, data2, device=torch.device('cpu')):
     return cosine_dis
 
 
-def pairwise_soft_dtw(data1, data2, sdtw=None, device=torch.device('cpu')):
+# def pairwise_soft_dtw_(data1, data2, sdtw=None, device=torch.device('cpu')):
+#     if sdtw is None:
+#         raise ValueError('sdtw is None - initialize it with SoftDTW')
+
+#     # transfer to device
+#     data1, data2 = data1.to(device), data2.to(device)
+
+#     # (data_num, seq_len, feature_dim=1)
+#     A = data1
+#     # (cluster_size, seq_len, feature_dim=1)
+#     B = data2
+
+#     distances = []
+#     for b in B:
+#         # (1, seq_len, 1)
+#         b = b.unsqueeze(dim=0)
+#         A, b = torch.broadcast_tensors(A, b)
+#         # (data_num, 1)
+#         sdtw_distance = sdtw(b, A).view(-1, 1)
+#         distances.append(sdtw_distance.cpu())
+
+#     # (data_num, cluster_size)
+#     dis = torch.cat(distances, dim=1)
+#     return dis
+
+def pairwise_soft_dtw(data1, data2, sdtw=None, device=torch.device('cpu'), batch_size=128):
     if sdtw is None:
         raise ValueError('sdtw is None - initialize it with SoftDTW')
 
     # transfer to device
     data1, data2 = data1.to(device), data2.to(device)
 
-    # (batch_size, seq_len, feature_dim=1)
-    A = data1.unsqueeze(dim=2)
-
+    # (data_num, seq_len, feature_dim=1)
+    A = data1
     # (cluster_size, seq_len, feature_dim=1)
-    B = data2.unsqueeze(dim=2)
+    B = data2
 
     distances = []
-    for b in B:
-        # (1, seq_len, 1)
-        b = b.unsqueeze(dim=0)
-        A, b = torch.broadcast_tensors(A, b)
-        # (batch_size, 1)
-        sdtw_distance = sdtw(b, A).view(-1, 1)
-        distances.append(sdtw_distance)
+    num_batches = len(A) // batch_size + 1
 
-    # (batch_size, cluster_size)
-    dis = torch.cat(distances, dim=1)
+    for i in range(num_batches):
+        start_idx = i * batch_size
+        end_idx = (i + 1) * batch_size
+
+        batch_A = A[start_idx:end_idx]
+
+        if len(batch_A) == 0:
+            break
+
+        batch_distances = []
+        for b in B:
+            # (1, seq_len, 1)
+            b = b.unsqueeze(dim=0)
+            A_expanded, b_expanded = torch.broadcast_tensors(batch_A, b)
+            # (batch_size, 1)
+            sdtw_distance = sdtw(b_expanded, A_expanded).view(-1, 1)
+            batch_distances.append(sdtw_distance.cpu())
+
+        # (batch_size, cluster_size)
+        batch_dis = torch.cat(batch_distances, dim=1)
+        distances.append(batch_dis.cpu())
+
+    # Concatenate batch results
+    dis = torch.cat(distances, dim=0)
     return dis
+
+
+
+
